@@ -1,0 +1,30 @@
+name: Drink_Robot_Voice
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - portaudio
+  - pip:
+      - torch==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+      - torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu124
+      - torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+      - ultralytics==8.4.26
+      - onnxruntime==1.23.2
+      - openwakeword==0.6.0
+      - PyAudio==0.2.14
+      - pygame==2.6.1
+      - google-genai==1.68.0
+      - google-cloud-speech==2.37.0
+      - google-cloud-texttospeech==2.34.0
+      - numpy==1.26.4
+      - scipy==1.15.3
+      - opencv-python==4.9.0.80
+      - pillow==12.1.1
+      - pandas==2.0.0
+      - pydantic==2.12.5
+      - colcon-common-extensions==0.3.0
+      - catkin-pkg==1.1.0
+      - rosdep==0.26.0
+      - setuptools==81.0.0
