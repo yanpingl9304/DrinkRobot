@@ -175,7 +175,6 @@ class DrinkRobotApp(Node):
     def depth_callback(self, msg):
         """ 接收深度圖並存入快取 """
         try:
-            # 轉換並縮小深度圖，INTER_NEAREST 確保深度數值不失真
             raw_depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='16UC1')
             self.latest_depth_img = cv2.resize(raw_depth, (1280, 720), interpolation=cv2.INTER_NEAREST)
         except Exception as e:
@@ -238,9 +237,8 @@ class DrinkRobotApp(Node):
             img_pil = PILImage.fromarray(img_rgb)
             img_tk = ImageTk.PhotoImage(image=img_pil)
             
-            # 這裡順序很重要
             self.video_label.config(image=img_tk)
-            self.video_label.img_tk = img_tk  # 必須保留引用，否則影像會消失
+            self.video_label.img_tk = img_tk
         except Exception:
             pass
 
@@ -273,7 +271,7 @@ class DrinkRobotApp(Node):
                 oww_model.predict(audio_frame)
 
                 for mdl, score in oww_model.prediction_buffer.items():
-                    if score[-1] > 0.3:  # 喚醒詞觸發門檻，建議調整到 0.3-0.5 之間，視環境而定
+                    if score[-1] > 0.3:  # 喚醒詞觸發門檻
                         self.is_processing = True
                         if self.mic_stream: self.mic_stream.stop_stream(); self.mic_stream.close(); self.mic_stream = None
                         print("Score:", score[-1])
@@ -289,7 +287,7 @@ class DrinkRobotApp(Node):
 
     def _voice_logic_task(self):
         try:
-            time.sleep(0.2) # 給硬體一點緩衝時間
+            time.sleep(0.2)
             fname = "user_voice.wav"
             self._record_audio(fname, duration=4)
             text = self._stt(fname)
@@ -299,7 +297,7 @@ class DrinkRobotApp(Node):
                 self.root.after(0, lambda: self.log_chat("User", text))
                 self.process_gemini_and_speak(text)
             else:
-                print("STT 辨識失敗或沒抓到聲音") # 如果跳這行，代表沒錄到音
+                print("STT 辨識失敗或沒抓到聲音")
                 self.is_processing = False
                 self.root.after(0, lambda: self.update_ui("監聽喚醒詞中", "green"))
         except Exception as e:
@@ -309,14 +307,12 @@ class DrinkRobotApp(Node):
     def process_gemini_and_speak(self, prompt, auto_listen=True):
         response_text = self.gemini_brain(prompt)
         
-        # 確保 response_text 不是 None 或空值
         if not response_text or response_text.strip() == "":
             response_text = "我聽不太清楚，可以再說一次嗎？"
 
         self.root.after(0, lambda: self.log_chat("Aqua", response_text))
         self._tts_and_play(response_text)
         
-        # 檢查是否為天氣資訊 (報完天氣就結束)
         is_weather = any(k in response_text for k in ["度", "氣溫", "天氣", "下雨", "晴天"])
         
         should_listen = auto_listen or "？" in response_text or "?" in response_text
@@ -462,16 +458,14 @@ class DrinkRobotApp(Node):
         Args:
             location: 桌號，例如 5，或起始點：home
         """
-        # 在真實情況下，這裡可能會呼叫外部 API 或內部系統來處理訂單
+        
         print(f"* 收到送餐請求，桌號：{location}")
-
 
         msg = String()
         msg.data = location
         self.pub.publish(msg)
         self.get_logger().info(f"Navigation to {location}")
 
-        # 4. 立即回傳結果給 Gemini，確保 API 不會逾時
         if location in ["1","2","3","4","5","6"]:
             self.is_delivery = True
             return f"已為 {location} 號桌的客人送上早餐！"
