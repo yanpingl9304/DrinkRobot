@@ -6,7 +6,6 @@ import ctypes
 import wave
 import numpy as np
 import cv2
-# 1. 改用 ROS 2 影像處理相關庫，移除 pyrealsense2
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
 import message_filters
