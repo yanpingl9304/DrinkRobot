@@ -26,25 +26,6 @@ from rclpy.node import Node
 from std_msgs.msg import String, Bool
 import openwakeword
 
-"""
-
-sudo chmod 666 /dev/ttyUSB0
-sudo chmod 666 /dev/ttyUSB1
-
-
-
-rqt
-
-
-
-[-1.5 ,-0.3, 2.15, 0.0, 1.6, 0.0]
-
-right [-1.85, 1.15, -1.75, -2.55, 1.6, -3.0]
-
-left [1.76, 1.4, -2.33, 0.93, -1.77, 0.0]
-
-"""
-
 # --- 屏蔽 ALSA 錯誤訊息 ---
 ERROR_HANDLER_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
 def py_error_handler(filename, line, function, err, fmt): pass
@@ -152,14 +133,11 @@ class DrinkRobotApp(Node):
 
     def stop_all(self):
         self.is_running = False
-        # 暫停處理
         self.update_ui("系統已停止", "red")
 
     def ros_update(self):
         if rclpy.ok():
-            # 處理掛起的事件
             rclpy.spin_once(self, timeout_sec=0)
-        # 必須改為 10ms，否則影像串流會卡死在 Buffer
         self.root.after(10, self.ros_update)
 
     def start_all(self):
