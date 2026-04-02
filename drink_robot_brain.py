@@ -65,7 +65,7 @@ class DrinkRobotApp(Node):
         
         # 2. 模型初始化
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.yolo_model = YOLO('/workspaces/NCKU_CSIE_RL_Robot-main/src/NIAR_Dual_AMM/niar_dual_amm/dual_amm/resource/yolov10m.pt')
+        self.yolo_model = YOLO('./resource/yolov10m.pt')
         self.gemini_client = genai.Client(api_key=GOOGLE_GEMINI_API_KEY)
         
         # 3. ROS 2 通訊與影像轉換
