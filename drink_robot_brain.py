@@ -37,8 +37,8 @@ except: pass
 
 # --- 全域參數設定 ---
 GOOGLE_GEMINI_API_KEY = "YOUR_API_KEY_HERE"
-OS_CREDENTIALS_PATH = "/workspaces/NCKU_CSIE_RL_Robot-main/src/NIAR_Dual_AMM/niar_dual_amm/dual_amm/resource/google_credential.json"
-WAKEWORD_MODEL_PATH = "/workspaces/NCKU_CSIE_RL_Robot-main/src/NIAR_Dual_AMM/niar_dual_amm/dual_amm/resource/WakeWord/Aqua.onnx"
+OS_CREDENTIALS_PATH = "./resource/google_credential.json"
+WAKEWORD_MODEL_PATH = "./resource/WakeWord/Aqua.onnx"
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = OS_CREDENTIALS_PATH
 
 openwakeword.utils.download_models()
@@ -319,7 +319,6 @@ class DrinkRobotApp(Node):
         # 檢查是否為天氣資訊 (報完天氣就結束)
         is_weather = any(k in response_text for k in ["度", "氣溫", "天氣", "下雨", "晴天"])
         
-        # 關鍵修改：只要 auto_listen 是 True OR 內容有問號 OR 是主動引導語，就繼續聽
         should_listen = auto_listen or "？" in response_text or "?" in response_text
 
         if "祝您" in response_text or "請隨時告訴我喔" in response_text:
@@ -488,17 +487,13 @@ def main():
     rclpy.init()
     root = tk.Tk()
     
-    # 確保 DrinkRobotApp 繼承自 Node
     app = DrinkRobotApp(root)
     
     try:
-        # 開始 Tkinter 主迴圈
-        # 所有的 ROS 事件現在都依賴 app.ros_update 裡的 spin_once 觸發
         root.mainloop()
     except KeyboardInterrupt:
         pass
     finally:
-        # 關閉前清理
         app.destroy_node()
         rclpy.shutdown()
 
