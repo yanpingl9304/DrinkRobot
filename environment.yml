@@ -13,6 +13,7 @@ dependencies:
       - ultralytics==8.4.26
       - onnxruntime==1.23.2
       - openwakeword==0.6.0
+      - PyQt5==5.15.11
       - PyAudio==0.2.14
       - pygame==2.6.1
       - google-genai==1.68.0
@@ -24,7 +25,3 @@ dependencies:
       - pillow==12.1.1
       - pandas==2.0.0
       - pydantic==2.12.5
-      - colcon-common-extensions==0.3.0
-      - catkin-pkg==1.1.0
-      - rosdep==0.26.0
-      - setuptools==81.0.0
