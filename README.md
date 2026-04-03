@@ -1,6 +1,11 @@
-如果出現
+如果出現 numpy相關問題
+
+export PYTHONPATH=$CONDA_PREFIX/lib/python3.10/site-packages:$PYTHONPATH
 
 =========================================================================
+
+如果出現
+
 
 QObject::moveToThread: Current thread (0x5602786dac40) is not the object's thread (0x5602816923c0).
 Cannot move to target thread (0x5602786dac40)
@@ -25,8 +30,6 @@ xhost +local:root > /dev/null 2>&1
 =========================================================================
 
 如果改完出現
-
-=========================================================================
 
 qt.qpa.xcb: could not connect to display :0
 qt.qpa.plugin: Could not load the Qt platform plugin "xcb" in "/home/ncku_csie_rl/miniconda3/envs/Test_Env/lib/python3.10/site-packages/cv2/qt/plugins" even though it was found.
