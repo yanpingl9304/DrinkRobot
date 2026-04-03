@@ -1,7 +1,3 @@
-如果出現 numpy相關問題
-
-export PYTHONPATH=$CONDA_PREFIX/lib/python3.10/site-packages:$PYTHONPATH
-
 =========================================================================
 
 如果出現
