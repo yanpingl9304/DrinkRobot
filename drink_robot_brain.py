@@ -1,6 +1,6 @@
 import os
 import sys
-
+import io
 from PyQt5.QtWidgets import QApplication, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTextEdit, QPushButton
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
@@ -9,19 +9,20 @@ import time
 import datetime
 import threading
 import ctypes
-import wave
 import numpy as np
 import cv2
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
 
 import pyaudio
+from pymouth import VTSAdapter, DBAnalyser
+import sounddevice as sd
+from pydub import AudioSegment
 
 from ultralytics import YOLO
 from google import genai
 from google.cloud import speech, texttospeech
 import requests
-from pygame import mixer
 import torch
 
 import rclpy
@@ -40,14 +41,13 @@ try:
 except: pass
 
 # --- 全域參數設定 ---
-GOOGLE_GEMINI_API_KEY = "your_google_gemini_api_key_here"
+GOOGLE_GEMINI_API_KEY = "api_key"
 OS_CREDENTIALS_PATH = "./resource/google_credential.json"
-WAKEWORD_MODEL_PATH = "./resource/WakeWord/SIAO_MING.onnx"
+WAKEWORD_MODEL_PATH = "./resource/WakeWord/mei.onnx"
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = OS_CREDENTIALS_PATH
 
 openwakeword.utils.download_models()
 
-# --- 新增這個類別：專門負責跨執行緒傳遞 UI 更新訊號 ---
 class UISignals(QObject):
     update_status = pyqtSignal(str, str)
     log_msg = pyqtSignal(str, str)
@@ -65,7 +65,7 @@ class DrinkRobotApp(Node):
         
         # --- PyQt5 視窗初始化 ---
         self.window = QWidget()
-        self.window.setWindowTitle("送餐機器人中控系統 (PyQt5版)")
+        self.window.setWindowTitle("飲料機器人中控系統")
         self.window.resize(1600, 900)
         self.window.setStyleSheet("background-color: #f0f0f0;")
         
@@ -74,10 +74,10 @@ class DrinkRobotApp(Node):
         self.is_processing = False 
         self.is_delivery = False
         self.last_visual_trigger_time = 0
-        self.visual_cooldown = 80
+        self.visual_cooldown = 120
 
         self.frame_count = 0
-        self.detect_every_n_frames = 5
+        self.detect_every_n_frames = 1
         self.last_ui_update_time = 0
         self.ui_update_interval = 0.05
         
@@ -88,9 +88,6 @@ class DrinkRobotApp(Node):
         
         # 3. ROS 2 通訊與影像轉換
         self.bridge = CvBridge()
-        self.pub = self.create_publisher(String, '/goal_pose', 10)
-        self.sub = self.create_subscription(Bool, '/navigation_complete', self.nav_callback, 10)
-        self.subscription = self.create_subscription(String, '/goal_pose', self.goal_callback, 10)
 
         # 影像訂閱佔位符
         self.color_sub = None
@@ -100,10 +97,9 @@ class DrinkRobotApp(Node):
         # 工具對照表
         self.available_functions = {
             "get_weather_internal": self.get_weather_internal,
-            "delivery_breakfast": self.delivery_breakfast,
             "select_drink": self.select_drink
         }
-        self.tools = [self.get_weather_internal, self.delivery_breakfast, self.select_drink]
+        self.tools = [self.get_weather_internal, self.select_drink]
 
         # 4. UI 介面建置
         self._setup_ui()
@@ -115,6 +111,12 @@ class DrinkRobotApp(Node):
 
         # 顯示視窗
         self.window.show()
+
+        print("--- 真正支援播放的設備清單 ---")
+        devices = sd.query_devices()
+        for i, dev in enumerate(devices):
+            if dev['max_output_channels'] > 0:
+                print(f"Index {i}: {dev['name']} | 最大聲道: {dev['max_output_channels']} | 默認採樣率: {dev['default_samplerate']}")
 
     def goal_callback(self, msg: String):
         self.get_logger().info(f"Goal received: {msg.data}")
@@ -173,13 +175,10 @@ class DrinkRobotApp(Node):
         btn_layout.addWidget(self.stop_btn)
         right_layout.addLayout(btn_layout)
 
-    # --- UI 安全更新機制 (使用 QTimer 確保 Thread-Safe) ---
     def update_ui(self, text, color):
-        # 背景執行緒呼叫這個，發射訊號給主執行緒
         self.signals.update_status.emit(text, color)
 
     def _real_update_ui(self, text, color):
-        # 主執行緒真正負責更新 UI 的地方
         self.status_label.setText(text)
         self.status_light.setStyleSheet(f"background-color: {color}; border-radius: 15px;")
 
@@ -194,17 +193,12 @@ class DrinkRobotApp(Node):
     def _update_video_ui(self, cv_img):
         """ 將 OpenCV 影像顯示在 PyQt 的 Label 上 """
         try:
-            # 1. 確保影像是 RGB 格式 (OpenCV 預設是 BGR)
             height, width, channel = cv_img.shape
             bytesPerLine = 3 * width
-            # QImage 需要 RGB888，所以用 rgbSwapped() 轉過來
             q_img = QImage(cv_img.data, width, height, bytesPerLine, QImage.Format_RGB888).rgbSwapped()
             
-            # 2. 轉為 QPixmap
             pixmap = QPixmap.fromImage(q_img)
             
-            # 3. 【核心修正點】請換成你 UI 裡面正確的元件名稱
-            # 假設正確名稱是 self.video_label
             if hasattr(self, 'video_label'):
                 self.video_label.setPixmap(pixmap.scaled(
                     self.video_label.width(), 
@@ -212,7 +206,6 @@ class DrinkRobotApp(Node):
                     Qt.KeepAspectRatio
                 ))
             else:
-                # 如果你還是不知道名字，印出所有成員來檢查 (Debug 用)
                 print(f"找不到 label_vision，當前物件成員包含: {[m for m in dir(self) if 'label' in m.lower()]}")
                 
         except Exception as e:
@@ -242,6 +235,9 @@ class DrinkRobotApp(Node):
 
             color_topic = '/arm/camera_right/realsense_camera_right/color/image_raw'
             depth_topic = '/arm/camera_right/realsense_camera_right/aligned_depth_to_color/image_raw'
+            
+            # color_topic = '/camera/realsense_camera_right/color/image_raw'
+            # depth_topic = '/camera/realsense_camera_right/aligned_depth_to_color/image_raw'
             
             self.get_logger().info(f"正在啟動手動同步訂閱: {color_topic}")
 
@@ -334,7 +330,7 @@ class DrinkRobotApp(Node):
                             cv2.putText(img, f"{dist:.2f}m", (x1, y1-10), 
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-                # --- 7. 視覺觸發邏輯 (Gemini 語音) ---
+                # --- 7. 視覺觸發邏輯 ---
                 now = time.time()
                 if 0 < closest_dist < 1.2 and not self.is_processing and (now - self.last_visual_trigger_time > self.visual_cooldown):
                     self.is_processing = True
@@ -352,7 +348,6 @@ class DrinkRobotApp(Node):
                 self.signals.update_video.emit(img.copy())
                 
         except Exception as e:
-            # 捕捉真正的邏輯錯誤，並過濾掉 OpenCV 的斷言訊息
             if "Assertion failed" not in str(e):
                 print(f"影像處理流程異常: {e}")
 
@@ -365,7 +360,8 @@ class DrinkRobotApp(Node):
                 if self.is_processing:
                     if self.mic_stream:
                         self.mic_stream.stop_stream(); self.mic_stream.close(); self.mic_stream = None
-                    time.sleep(0.5); continue
+                    time.sleep(0.5)
+                    continue
 
                 if self.mic_stream is None:
                     self.update_ui("嘗試開啟麥克風中...", "yellow") 
@@ -373,19 +369,29 @@ class DrinkRobotApp(Node):
                     
                     self.mic_stream = pa.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=1280)
                     
-                    self.update_ui("正在監聽 Siao Ming...", "green")
+                    self.update_ui("監聽喚醒詞中", "green")
                     print("系統：麥克風開啟成功！")
 
                 data = self.mic_stream.read(1280, exception_on_overflow=False)
-                audio_frame = np.frombuffer(data, dtype=np.int16)
-                print(f"當前音量: {np.abs(audio_frame).max()}", end='\r')
+                
+                # 1. 讀取並轉成 float32 進行計算
+                audio_float = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+                
+                # 2. 放大音量 (增益)，讓喚醒詞更靈敏
+                audio_float *= 2.0
+                
+                # 3. 限制數值範圍在 int16 之間（防止破音），再轉回 int16
+                audio_frame = np.clip(audio_float, -32768, 32767).astype(np.int16)
+                
+                # 接下來再餵給模型
+                print(f"當前音量 (增益後): {np.abs(audio_frame).max()}", end='\r')
                 oww_model.predict(audio_frame)
 
                 for mdl, score in oww_model.prediction_buffer.items():
-                    if score[-1] > 0.2:  # 喚醒詞觸發門檻
+                    if score[-1] > 0.20:  # 喚醒詞觸發門檻
                         self.is_processing = True
                         if self.mic_stream: self.mic_stream.stop_stream(); self.mic_stream.close(); self.mic_stream = None
-                        print("Score:", score[-1])
+                        print("\nScore:", score[-1])
                         self._tts_and_play("在的，請說。")
                         self.update_ui("聽取指令中...", "yellow")
                         self.handle_voice_interaction()
@@ -401,43 +407,41 @@ class DrinkRobotApp(Node):
 
     def _voice_logic_task(self):
         try:
-            time.sleep(0.2)
-            fname = "user_voice.wav"
-            self._record_audio(fname, duration=4)
-            text = self._stt(fname)
-            # text = "我要一杯咖啡"
-            if text:
-                print(f"辨識結果: {text}") # Debug 用
+            self.update_ui("請說話...", "orange")
+            
+            # 1. 串流 STT，邊錄音邊回傳結果
+            text = self._streaming_stt() 
+
+            if text and text.strip():
                 self.log_chat("User", text)
+                
+                # 2. 進入 Gemini 與 TTS 邏輯
                 self.process_gemini_and_speak(text)
             else:
-                print("STT 辨識失敗或沒抓到聲音")
-                self.is_processing = False
-                self.update_ui("監聽喚醒詞中", "green")
+                print("未偵測到有效語音")
+                self.update_ui("監聽中", "green")
+                
         except Exception as e:
             print(f"語音邏輯出錯: {e}")
-        self.is_processing = False
+        finally:
+            # 確保無論成功或失敗，狀態都會重置
+            self.is_processing = False
+            if not hasattr(self, 'playing_audio') or not self.playing_audio:
+                self.update_ui("監聽喚醒詞中", "green")
 
     def process_gemini_and_speak(self, prompt, auto_listen=True):
+        
+        now =time.time()
         response_text = self.gemini_brain(prompt)
         print(f"Gemini 回應: {response_text}") # Debug 用
-        
+        print(f"處理 Gemini 邏輯耗時: {time.time() - now:.2f} 秒") # Debug 用
+
         if not response_text or response_text.strip() == "":
             response_text = "我聽不太清楚，可以再說一次嗎？"
 
-        self.log_chat("Siao Ming", response_text)
         self._tts_and_play(response_text)
         
-        is_weather = any(k in response_text for k in ["度", "氣溫", "天氣", "下雨", "晴天"])
-        
-        should_listen = auto_listen or "？" in response_text or "?" in response_text
-
-        if "祝您" in response_text or "請隨時告訴我喔" in response_text:
-            should_listen = False
-
-        print("Should Listen:", should_listen)
-        
-        if should_listen :
+        if auto_listen:
             self.update_ui("正在聽取您的回覆...", "yellow")
             self._voice_logic_task()
         else:
@@ -457,20 +461,18 @@ class DrinkRobotApp(Node):
         instruction = f"""
         {system_time}
         ## ROLE
-        你是一個溫暖貼心的繁體中文早餐機器人與送餐機器人與飲料機器人 Siao Ming，不負責點餐，僅負責執行指令與客人互動。
+        你是一個溫暖貼心的繁體中文飲料機器人 小美，不負責點餐，僅負責執行指令與客人互動。
 
         ## STRICT RULES (PRIORITY: CRITICAL)
-        1. **FUNCTION CALL FIRST**: 當使用者表達「送餐、送過來、就這樣、麻煩了」或「回到起始點」時，必須先執行 `delivery_service()`。
-        2. **WEATHER TRIGGER**: 詢問天氣、氣溫或穿衣建議時，必須先執行 `get_weather_internal()`。
-        3. **DRINK SERVICE**: 選擇飲料時執行 `select_drink()`。選完後主動問是否查天氣或是詢問要不要聽笑話。
-        4. **NO TEXT PREVIEW**: 工具執行前，不可對使用者做出任何承諾。
-        5. **STATUS BOUNDARY**: 嚴禁提及「已送達」或「請享用」。接收送餐指令後，統一回覆：「已收到，準備送往 $X$ 號桌。」（$X$ 為桌號，若是 home 則回覆回到起始位置）。
-        6. **END OF MISSION**: 報完天氣資訊（包含溫度、氣候）後，請直接給予暖心祝福並【停止詢問任何問題】。
-        7. **TONE AND STYLE**: 回答要溫暖、貼心，且帶有一點幽默感。嚴禁機械式回覆或提及自己是機器人及使用表情符號。
+        1. **WEATHER TRIGGER**: 當使用者詢問天氣、氣溫或穿衣建議時，必須先執行 `get_weather_internal()`。
+        2. **DRINK SERVICE**: 選擇飲料時執行 `select_drink()`。選完後主動問是否查天氣或是詢問要不要聽笑話。
+        3. **NO TEXT PREVIEW**: 工具執行前，不可對使用者做出任何承諾。
+        4. **END OF MISSION**: 報完天氣資訊（包含溫度、氣候）後，請直接給予暖心祝福並【停止詢問任何問題】。
+        5. **TONE AND STYLE**: 回答要溫暖、貼心，且帶有一點幽默感。嚴禁機械式回覆或提及自己是機器人及使用表情符號。
 
         ## STEP-BY-STEP LOGIC
         Step 1: 偵測使用者意圖。
-        Step 2: 涉及送餐、選飲或天氣時，【立即調用相關工具】，不准廢話。
+        Step 2: 涉及選飲或天氣時，【立即調用相關工具】，不准廢話。
         Step 3: 獲得工具回傳結果後，再根據結果回覆使用者。
 
         ## TRIGGER KEYWORDS
@@ -478,15 +480,11 @@ class DrinkRobotApp(Node):
         - 天氣意圖："天氣"、"氣溫"、"台北天氣"、"台南氣溫"。
         """
 
-        process_input = user_input
-        if any(k in user_input for k in ["天氣", "氣溫", "溫度"]):
-            process_input = f"【指令：請立即查詢天氣】{user_input}"
-
         try:
             # 1. 發送請求給 Gemini
             response = self.gemini_client.models.generate_content(
                 model="gemini-3.1-flash-lite-preview" ,
-                contents=[process_input],
+                contents=[user_input],
                 config={"tools": self.tools, "system_instruction": instruction}
             )
 
@@ -496,49 +494,113 @@ class DrinkRobotApp(Node):
             print(f"Gemini API Error: {e}")
             return "抱歉，我的大腦連線發生了一點問題。"
 
-    def _record_audio(self, fname, duration):
-        p = pyaudio.PyAudio()
 
-        stream = p.open(format=pyaudio.paInt16, 
-                        channels=1, 
-                        rate=16000, 
-                        input=True, 
-                        frames_per_buffer=1024)
+
+    def _streaming_stt(self):
+        client = speech.SpeechClient()
+
+        # 1. 設定辨識參數
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=16000,
+            language_code="zh-TW",
+        )
+        streaming_config = speech.StreamingRecognitionConfig(
+            config=config, 
+            interim_results=True
+        )
+
+        # 2. 設定錄音串流
+        CHUNK = 1024
+        p = pyaudio.PyAudio()
+        stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000,
+                        input=True, frames_per_buffer=CHUNK)
+
+        print("請說話...")
+
+        def request_generator():
+            last_audio_time = time.time()
+            
+            for _ in range(0, int(16000 / CHUNK * 4)):
+                data = stream.read(CHUNK, exception_on_overflow=False)
+                
+                if time.time() - last_audio_time > 2.0:
+                    print("🚨 超過2秒未收到有效操作，自動結束...")
+                    break 
+                    
+                yield speech.StreamingRecognizeRequest(audio_content=data)
+
+        # 3. 開始串流辨識
+        responses = client.streaming_recognize(config=streaming_config, requests=request_generator())
+
+        final_transcript = ""
         
-        frames = [stream.read(1024, exception_on_overflow=False) for _ in range(0, int(16000 / 1024 * duration))]
+        # 4. 處理回傳結果
+        for response in responses:
+            for result in response.results:
+                if result.is_final:
+                    final_transcript = result.alternatives[0].transcript
+                    print(f"辨識結果: {final_transcript}")
+                    
+        # 關閉資源
         stream.stop_stream()
         stream.close()
         p.terminate()
 
-        with wave.open(fname, 'wb') as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
-            wf.setframerate(16000)
-            wf.writeframes(b''.join(frames))
-
-    def _stt(self, fname):
-        client = speech.SpeechClient()
-        with open(fname, "rb") as f: content = f.read()
-        audio = speech.RecognitionAudio(content=content)
-        config = speech.RecognitionConfig(encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-                                        sample_rate_hertz=16000, 
-                                        language_code="zh-TW")
-        
-        res = client.recognize(config=config, audio=audio)
-        if os.path.exists(fname): os.remove(fname)
-        for result in res.results: return result.alternatives[0].transcript
-        return None
+        return final_transcript if final_transcript else None
 
     def _tts_and_play(self, text):
+        now = time.time()
         client = texttospeech.TextToSpeechClient()
-        voice = texttospeech.VoiceSelectionParams(language_code="cmn-TW", name="cmn-TW-Standard-A")
-        audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3, speaking_rate=1.5)
-        res = client.synthesize_speech(input=texttospeech.SynthesisInput(text=text), voice=voice, audio_config=audio_config)
-        with open("temp.mp3", "wb") as out: out.write(res.audio_content)
+        voice = texttospeech.VoiceSelectionParams(language_code="cmn-TW", name="cmn-TW-Wavenet-A")
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.LINEAR16, 
+            sample_rate_hertz=44100,
+            speaking_rate=1.2,
+            pitch = 5.0
+        )
+        
+        res = client.synthesize_speech(
+            input=texttospeech.SynthesisInput(text=text), 
+            voice=voice, 
+            audio_config=audio_config
+        )
+        
+        self.log_chat("小美", text)
         self.update_ui("播放回應中", "lightblue")
-        mixer.init(); mixer.music.load("temp.mp3"); mixer.music.play()
-        while mixer.music.get_busy(): time.sleep(0.1)
-        mixer.music.unload(); os.remove("temp.mp3")
+
+        # 2. 在記憶體處理
+        audio_data = io.BytesIO(res.audio_content)
+        
+        # 3. 計算播放時間
+        audio_segment = AudioSegment.from_wav(audio_data)
+        audio_duration = audio_segment.duration_seconds
+        
+        wav_path = "temp.wav"
+        with open(wav_path, "wb") as f:
+            f.write(res.audio_content)
+
+        print(f"TTS 生成總耗時: {time.time() - now:.2f} 秒")
+        now = time.time()
+        try:
+        # 4. 執行播放
+            # Vtuber Studio 跑在本地 不用打 ws_uri=target_ws
+            # output_device 看自己電腦的播放設備清單
+            # target_ws = 'ws://100.79.190.70:8001' 
+            # temperature 可以改開口大小
+            with VTSAdapter(DBAnalyser(temperature=10), ws_uri=target_ws) as a:
+                a.action(audio=wav_path, samplerate=44100, output_device=5)
+                time.sleep(audio_duration+0.65)# 緩衝
+        except Exception as e:
+            print(f"播放錯誤: {e}")
+
+        # 5. 清理臨時檔
+        if os.path.exists(wav_path):
+            os.remove(wav_path)
+        
+        print(f"播放總耗時: {time.time() - now:.2f} 秒")
+        
+        
 
     # --- 機器人工具函式 ---
     def get_weather_internal(self, location: str):
@@ -565,44 +627,18 @@ class DrinkRobotApp(Node):
         valid = {"coffee": "咖啡", "tea": "茶", "water": "水"}
         drink = drink_type.lower()
         print(f"* 選擇飲料：{drink}")
-        if drink in valid: return f"好的，已為您準備{valid[drink]}。對了，氣溫多變，需要我查天氣或是詢問要不要聽笑話嗎？"
-        return "抱歉，目前只有咖啡、水和茶。"
 
-    def delivery_breakfast(self, location:str):
-        """
-        送早餐服務
-        Args:
-            location: 桌號，例如 5，或起始點：home
-        """
         
-        print(f"* 收到送餐請求，桌號：{location}")
-
-        msg = String()
-        msg.data = location
-        self.pub.publish(msg)
-        self.get_logger().info(f"Navigation to {location}")
-
-        if location in ["1","2","3","4","5","6"]:
-            self.is_delivery = True
-            return f"已為 {location} 號桌的客人送上早餐！"
-        elif location in ["home"]:
-            return f"已為回到起始位置！"
-
-    def nav_callback(self, msg):
-        if msg.data and self.is_delivery:
-            self.is_delivery = False
-            self.process_gemini_and_speak("我已經到達目的地了，請享用您的飲料！")
+        if drink in valid: return f"好的，將為您準備{valid[drink]}。告知使用者準備時間約2分鐘，詢問是否需要查天氣或是詢問要不要聽笑話嗎？嚴禁提到「已經為您準備」等確認完成的詞。"
+        return f"抱歉，目前只有咖啡、水和茶，且僅告知中文選項。"
 
 def main():
     rclpy.init()
-    # 建立 Qt 應用程式
     app = QApplication(sys.argv)
     
-    # 初始化你的機器人節點 (現在也負責啟動 UI)
     robot_node = DrinkRobotApp()
     
     try:
-        # 啟動 Qt 主迴圈 (這會阻塞直到視窗關閉)
         sys.exit(app.exec_())
     except KeyboardInterrupt:
         pass
