@@ -48,3 +48,6 @@ https://github.com/organics2016/pymouth
 ```bash
 pip install "numpy<2"
 ```
+
+## 喚醒詞檔案 改成 mei.onnx
+喚醒詞 == 你好 小美
