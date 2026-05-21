@@ -13,7 +13,6 @@ Handles:
 Publishes /user_command (std_msgs/String) when a command is resolved.
 Subscribes /robot_status (std_msgs/String) for state awareness.
 
-export GOOGLE_GEMINI_API_KEY="AIzaSyByHt3zz6UHiBNwcSKTWkni84o_0pY6oJo"
 """
 
 from __future__ import annotations
