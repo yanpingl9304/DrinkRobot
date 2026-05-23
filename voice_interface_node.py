@@ -103,7 +103,8 @@ class VoiceInterfaceNode(Node):
         # 工具對照表
         self.available_functions = {
             "get_weather_internal": self.get_weather_internal,
-            "select_drink": self.select_drink
+            "select_drink": self.select_drink,
+            "deliver_drink": self.deliver_drink
         }
         # 在 __init__ 裡面
         self.tools = [
@@ -129,6 +130,24 @@ class VoiceInterfaceNode(Node):
                                 "drink_type": {"type": "STRING", "description": "飲料類型，例如 'coffee'"}
                             },
                             "required": ["drink_type"]
+                        }
+                    },
+                    {
+                        "name": "deliver_drink",
+                        "description": "【廚房內部系統專用】將指定的飲料運送到指定的桌號，並通知廚房人員進行出餐準備。",
+                        "parameters": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "drink_type": {
+                                    "type": "STRING", 
+                                    "description": "飲料類型，僅接受 'coffee'、'tea' 或 'water'"
+                                },
+                                "table_number": {
+                                    "type": "INTEGER", 
+                                    "description": "目標桌號，必須為大於 0 的正整數"
+                                }
+                            },
+                            "required": ["drink_type", "table_number"]
                         }
                     }
                 ]
@@ -157,9 +176,17 @@ class VoiceInterfaceNode(Node):
         threading.Thread(target=self._wakeword_loop, daemon=True).start()
         self.get_logger().info('VoiceInterfaceNode started')
 
+    
+        self._listener_sub = self.create_subscription(String, 'voice_chatter', self.speak_callback, 10)
+
     # ------------------------------------------------------------------
     # ROS callbacks
     # ------------------------------------------------------------------
+    def speak_callback(self, msg):
+            self.get_logger().info(f'收到："{msg.data}"，準備播放回復。')
+            self._is_processing = True
+            self._tts_and_play(msg.data)
+            self._handle_voice_interaction()
 
     def _status_callback(self, msg: String):
         self.get_logger().info(f'robot status: {msg.data}')
@@ -228,7 +255,8 @@ class VoiceInterfaceNode(Node):
             self._last_visual_trigger = now
             threading.Thread(
                 target=self._gemini_and_speak,
-                args=('偵測到有人靠近。請主動溫馨地打招呼，詢問是否需要咖啡、水或茶。嚴禁提到餐點相關。', True),
+                args=('【前台互動提示】偵測到有人靠近。請以溫暖貼心語氣主動向客人打招呼（嚴禁使用機械式罐頭對話、嚴禁使用表情符號、切勿提及自己是機器人）。請詢問客人今天是否想來杯「咖啡、水或茶」？ \
+                       【關鍵限制】此時客人尚未決定，嚴禁提到「點餐、送餐、餐點、出餐、桌號」等任何與餐點或後送相關的字眼。', True),
                 daemon=True,
             ).start()
 
@@ -342,32 +370,44 @@ class VoiceInterfaceNode(Node):
 
         system_time = f"Current time is {current_time}，{week_day}。"
         
-        instruction = f"""
+        instruction = instruction = instruction = f"""
         {system_time}
         ## ROLE
-        你是一個溫暖貼心的繁體中文飲料機器人 小美，不負責點餐，僅負責執行指令與客人互動。
+        你是一個溫暖貼心的繁體中文飲料機器人 小美。
+        - 對客人：你不負責點餐，僅負責執行指令與客人互動。
+        - 對廚房：當收到具體的送餐指令時，你負責對內部廚房系統發送精準的調度指令。
 
         ## STRICT RULES (PRIORITY: CRITICAL)
         1. **WEATHER TRIGGER**: 當使用者詢問天氣、氣溫或穿衣建議時，必須先執行 `get_weather_internal()`。
-        2. **DRINK SERVICE**: 選擇飲料時執行 `select_drink()`。選完後主動問是否查天氣或是詢問要不要聽笑話。
-        3. **NO TEXT PREVIEW**: 工具執行前，不可對使用者做出任何承諾。
-        4. **END OF MISSION**: 報完天氣資訊（包含溫度、氣候）後，請直接給予暖心祝福並【停止詢問任何問題】。
-        5. **TONE AND STYLE**: 回答要溫暖、貼心，且帶有一點幽默感。嚴禁機械式回覆或提及自己是機器人及使用表情符號。
+        2. **DRINK SERVICE**: 
+           - 當使用者單純提及飲料種類（如「我要咖啡」）而【沒有】提及桌號時，執行 `select_drink()`。選完後主動問是否查天氣或是詢問要不要聽笑話。
+        3. **DELIVER SERVICE (KITCHEN ONLY)**: 
+           - 當使用者的意圖符合送餐，且對話中【同時出現桌號與飲料種類】時（例如：「幫我送一杯咖啡到5號桌」），必須立即執行 `deliver_drink()`。
+           - **關鍵限制**：由於此工具僅供廚房端內部人員使用，調用此工具前或後，對使用者回覆時【嚴禁提及「已經為您準備」或「確認完成」等承諾詞】，只需依照工具回傳的廚房提示進行系統中繼。
+        4. **NO TEXT PREVIEW**: 工具執行前，不可對使用者做出任何承諾。
+        5. **END OF MISSION**: 報完天氣資訊（包含溫度、氣候）後，請直接給予暖心祝福並【停止詢問任何問題】。
+        6. **TONE AND STYLE**: 回答要溫暖、貼心，且帶有一點幽默感。嚴禁機械式回覆或提及自己是機器人及使用表情符號。
 
         ## STEP-BY-STEP LOGIC
         Step 1: 偵測使用者意圖。
-        Step 2: 涉及選飲或天氣時，【立即調用相關工具】，不准廢話。
-        Step 3: 獲得工具回傳結果後，再根據結果回覆使用者。
+        Step 2: 檢查參數完整性：
+                - 若【同時有飲料與桌號】 -> 優先調用 `deliver_drink()`。
+                - 若【只有飲料，無桌號】 -> 調用 `select_drink()`。
+                - 若涉及天氣 -> 調用 `get_weather_internal()`。
+        Step 3: 立即調用相關工具，不准廢話。
+        Step 4: 獲得工具回傳結果後，再根據結果與當前對象（前台客人/後台廚房）的身份回覆。
 
         ## TRIGGER KEYWORDS
-        - 送餐意圖："送餐"、"幫我送餐"、"送過來"、"點餐完畢"、"就這樣"、"麻煩外送"、"Ok 了"。
-        - 天氣意圖："天氣"、"氣溫"、"台北天氣"、"台南氣溫"。
+        - **送餐意圖（同時滿足「桌號」+「飲料種類」時調用 deliver_drink）**：
+          * 範例："幫我送一杯咖啡到 3 號桌"、"2號桌要一杯茶，送過來"、"就這樣，水送到 5 號桌"、"麻煩外送咖啡到 1 號桌"。
+        - **選飲意圖（單純提及飲料，調用 select_drink）**："我要咖啡"、"來杯茶"、"喝水"、"我想選點飲料"。
+        - **天氣意圖（調用 get_weather_internal）**："天氣"、"氣溫"、"台北天氣"、"台南氣溫"。
         """
 
         try:
             # 1. 第一次請求：詢問意圖
             response = self.gemini_client.models.generate_content(
-                model="gemini-3.1-flash-lite-preview",
+                model="gemini-3.1-flash-lite",
                 contents=[user_input],
                 config={"tools": self.tools, "system_instruction": instruction}
             )
@@ -417,15 +457,37 @@ class VoiceInterfaceNode(Node):
         獲取指定城市的即時天氣資訊。
         Args:
             location: 城市名稱，例如 'Tainan'
+        Returns:
+            dict: 包含天氣數據與 LLM 互動指引的字典。
         """
-        
         url = f"http://api.weatherapi.com/v1/current.json?key=040e24d691134027aa8115215262102&q={location}&aqi=no"
+        
         try:
-            res = requests.get(url).json()
-            self.get_logger().info(f"* 天氣資訊：{res}，不須再次詢問是否需要飲料")
-            return res 
+            response = requests.get(url)
+            res = response.json()
+            self.get_logger().info(f"* 天氣資訊：{res}")
+            
+            if "error" in res:
+                return {
+                    "status": "error",
+                    "msg": f"【前台互動提示】無法取得 '{location}' 的天氣。請用溫暖貼心的語氣告知客人目前查詢失敗，並直接給予暖心祝福，結束對話（嚴禁再詢問是否要飲料或講笑話）。"
+                }
+
+            return {
+                "status": "success",
+                "raw_data": res,
+                "system_prompt_override": (
+                    "【前台互動提示】請根據 raw_data 中的 temp_c（氣溫）和 condition.text（天氣狀況）用繁體中文向客人回報。"
+                    "回報完天氣與穿衣建議後，請立即給予一個充滿幽默或溫暖的「暖心祝福」，然後【絕對禁止提問、絕對不要詢問是否需要飲料、絕對不要問要不要聽笑話】，直接優雅地結束對話。"
+                )
+            }
+            
         except Exception as e:
-            return {"error": str(e)}
+            self.get_logger().error(f"天氣 API 呼叫失敗: {str(e)}")
+            return {
+                "status": "error",
+                "msg": "【前台互動提示】天氣系統連線異常。請用溫暖的語氣向客人致歉，並祝他們有美好的一天，直接結束對話（嚴禁再詢問是否要飲料或講笑話）。"
+            }
         
     def select_drink(self, drink_type: str):
         """
@@ -441,9 +503,40 @@ class VoiceInterfaceNode(Node):
         msg.data = drink
         self._drink_cmd_pub.publish(msg)
 
-        if drink in valid: return f"好的，將為您準備{valid[drink]}。告知使用者準備時間約1分鐘，詢問是否需要查天氣或是詢問要不要聽笑話嗎？嚴禁提到「已經為您準備」等確認完成的詞。"
-        return f"抱歉，目前只有咖啡、水和茶，且僅告知中文選項。"
+        if drink in valid: 
+            # 專為前台客人設計：直接引導後續互動（查天氣/聽笑話）
+            return f"【前台互動提示】已為客人選取 {valid[drink]}。請以溫暖的語氣告知製作大約需要 1 分鐘，並主動詢問客人『是否需要順便幫您查詢天氣』或『想不想聽個笑話呢？』。嚴禁提及「已經為您準備好」或「點餐完成」等確認完成的詞彙。"
+        
+        # 失敗時的回應
+        return f"【前台互動提示】抱歉，目前現場只提供：咖啡、茶、水。請溫暖地引導客人重新選擇（注意：僅告知中文選項）。"
+    
+    def deliver_drink(self, drink_type: str, table_number: int):
+        """
+        將指定的飲料運送到指定的桌號。
 
+        此函式負責控制機器人（或系統）執行送餐任務。它會先驗證飲料類型
+        與桌號是否合法，接著規劃路徑並將飲料送達目的地。
+
+        Args:
+            drink_type (str): 飲料類型。僅接受 'coffee'、'tea' 或 'water'。
+            table_number (int): 目標桌號。必須為大於 0 的正整數。
+
+        Raises:
+            ValueError: 當傳入不支援的 `drink_type` 或無效的 `table_number` 時引發。
+            RuntimeError: 當導航系統故障或無法到達指定桌位時引發。
+        """
+        valid = {"coffee": "咖啡", "tea": "茶", "water": "水"}
+        drink = drink_type.lower()
+        self.get_logger().info(f"* 選擇飲料：{drink}，並送到：{table_number}號桌。")
+
+        msg = String()
+        msg.data = drink
+        self._drink_cmd_pub.publish(msg)
+
+        # 檢查飲料是否支援
+        if drink in valid: 
+            return f"【廚房任務】即將準備 {valid[drink]} 並送往 {table_number} 號桌，預計時間為 1 分鐘抵達。請注意：此時飲料尚未出餐，嚴禁向系統回報「已點選完成」或「已送達」。"
+        return f"【錯誤】不支援的飲料類型 '{drink_type}'。廚房目前僅供應：咖啡、茶、水。"
 
     # ------------------------------------------------------------------
     # Audio utilities
@@ -518,7 +611,7 @@ class VoiceInterfaceNode(Node):
         self.get_logger().info(f"TTS 生成總耗時: {time.time() - now:.2f} 秒")
         now = time.time()
         try:
-            target_ws = 'ws://100.79.190.70:8001' 
+            target_ws = 'ws://100.70.98.9:8001'
             with VTSAdapter(DBAnalyser(temperature=10),ws_uri=target_ws) as a:
                 a.action(audio=wav_path, samplerate=44100, output_device=4)
                 time.sleep(audio_duration)
