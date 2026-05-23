@@ -25,6 +25,10 @@ from dual_amm.dual_amm import DUAL_AMM_Node  # pyright: ignore[reportMissingImpo
 from drinks_robot_interface.action import ExecuteDrinkTask  # pyright: ignore[reportMissingImports]
 from .perception import ArucoContainerDetector, ContainerDetection, CupDetection, CupDetector
 from controller_api import MotionType
+from std_srvs.srv import Trigger
+from std_msgs.msg import String
+from sensor_msgs.msg import Image
+from std_msgs.msg import Header
 
 
 class DrinkTaskState(str, Enum):
@@ -51,15 +55,15 @@ class DrinkRobotConfig:
 class DrinkRobotNode(DUAL_AMM_Node):
     """Dual-arm drink robot with an eye-in-hand perception and motion flow."""
 
-
     LEFT_HOME_POSE  = [1.8,  0.785398163, -2.35619449, 1.570796327, -1.570796327, 0.0]
     RIGHT_HOME_POSE = [-1.8, 0.785398163, -2.35619449, 1.570796327, -1.570796327, 0.0]
+
+    #[0.351447021484375, 0.5592607421875, 0.6323394775390625, 3.095980427283897, -0.030131610026185574, 2.953043511573273]
 
     # Initial camera observation poses (Cartesian: x, y, z, rx, ry, rz)
     LEFT_CUP_VIEW_POSE        = [0.17220297, -0.70942737,  0.43800946, pi, 0.0, 0.25]
     RIGHT_CONTAINER_VIEW_POSE = [0.28012134,  0.47946701,  0.65280273, pi, 0.0, 2.9]
 
-    # 覆寫父類變數，統一設定所有路徑的 home pose
     _left_home_joint_pose  = LEFT_HOME_POSE
     _right_home_joint_pose = RIGHT_HOME_POSE
 
@@ -69,12 +73,16 @@ class DrinkRobotNode(DUAL_AMM_Node):
     CUP_PLACE_XY      = (-0.1, -0.7)            # xy position to set cup down after task
 
     # Container handle offset from ArUco marker origin (marker frame, metres)
-    # LEE: Maybe the problem is from here
-    # 容器把手相對於 ArUco marker 的位移 (單位：公尺)
+    # HANDLE_OFFSETS = {
+    #     "water": (-0.17, -0.08, -0.21),  # water
+    #     "coffee": (-0.16, -0.1, -0.225),  # coffee
+    #     "tea": (-0.157, -0.108, -0.22)   # tea
+    # }
+
     HANDLE_OFFSETS = {
-        "water": (-0.17, -0.09, -0.21),  # water
-        "coffee": (-0.16, -0.1, -0.225),  # coffee
-        "tea": (-0.157, -0.108, -0.22)   # tea
+        "water": (-0.17, -0.08, -0.21),  # water
+        "coffee": (-0.17, -0.08, -0.21),  # coffee
+        "tea": (-0.17, -0.08, -0.21)  # tea
     }
 
     # Container intermediate pose in joint space before approaching handle
@@ -83,20 +91,19 @@ class DrinkRobotNode(DUAL_AMM_Node):
     # Left arm holding pose while right arm executes the pour
     LEFT_ARM_POUR_HOLD_POSE = [0.02, -0.501, 0.4, 0.7 * pi, 0.0, -1.0]
 
-    # Pour trajectory waypoints (base XY + 0.02, base Z + 0.01 calibration applied)
+    # Pour trajectory waypoints
     POUR_WAYPOINTS = [
         [ 0.06,  0.395, 0.383, pi / 2, -pi / 2,       3.0],
         [ 0.03,  0.398, 0.423, pi / 2, -3 / 8 * pi,   3.0],
         [-0.02,  0.405, 0.488, pi / 2, -1 / 4 * pi,   3.0],
         [-0.05,  0.412, 0.535, pi / 2, -1 / 8 * pi,   3.0],
         [-0.08,  0.420, 0.525, pi / 2, -1 / 9 * pi,   3.0], 
-        [-0.09,  0.420, 0.525, pi / 2, -1 / 14 * pi,  3.0], # 6, 0.5
+        [-0.09,  0.420, 0.525, pi / 2, -1 / 15 * pi,  3.0], # 6, 0.5
         [-0.10,  0.420, 0.525, pi / 2, -1 / 17 * pi,  3.0], # 5, 0.4
         [-0.11,  0.420, 0.525, pi / 2, -1 / 21 * pi,  3.0], # 4, 0.5
         [-0.12,  0.420, 0.525, pi / 2, -1 / 40 * pi,  3.0], # 3, 0.5
         [-0.13,  0.423, 0.545, pi / 2, -1 / 155 * pi, 3.0], # 2, 0.4
         [-0.16,  0.425, 0.555, pi / 2, 1 / 100 * pi,   3.0], # 1, 3.0
-        
     ]
     # Return path mirrors POUR_WAYPOINTS in reverse; first X is slightly offset to clear the cup
     POUR_RETURN_WAYPOINTS = [
@@ -109,7 +116,7 @@ class DrinkRobotNode(DUAL_AMM_Node):
 
     def __init__(self):
         super().__init__(name='drink_robot_node')
-        self.state = DrinkTaskState.IDLE
+        self._state = DrinkTaskState.IDLE
 
         self.config = self._load_config()
 
@@ -118,14 +125,23 @@ class DrinkRobotNode(DUAL_AMM_Node):
         self.current_order: Optional[Dict[str, object]] = None
 
         self.drink_counters = {"water": 0, "coffee": 0, "tea": 0}
-        self.pour_depth_mapping = {1: 5, 2: 5, 3: 6, 4: 6, 5: 7, 6: 8}
-        self.pour_wait_mapping = {1: 0.2, 2: 0.6, 3: 0.2, 4: 0.6, 5: 0.2, 6: 0.0}
-        
+        # self.pour_depth_mapping = {1: 3, 2: 5, 3: 6, 4: 6, 5: 7, 6: 8}
+        self.pour_depth_mapping = {1: 3, 2: 3, 3: 4, 4: 4, 5: 5, 6: 6}
+        self.pour_wait_mapping = {1: 0.2, 2: 0.6, 3: 0.2, 4: 0.8, 5: 0.4, 6: 0.2}
+
+        self.status_pub = self.create_publisher(String, '/robot_status', 10)
+
+        self.srv_reset_water = self.create_service(Trigger, '/drinks_robot/reset_water', lambda req, res: self._srv_reset_specific_cb(req, res, 'water'))
+        self.srv_reset_coffee = self.create_service(Trigger, '/drinks_robot/reset_coffee', lambda req, res: self._srv_reset_specific_cb(req, res, 'coffee'))
+        self.srv_reset_tea = self.create_service(Trigger, '/drinks_robot/reset_tea', lambda req, res: self._srv_reset_specific_cb(req, res, 'tea'))
 
         # Initialize detection output directory
         self.detection_output_dir = Path('/workspaces/AI_Robot_ws/data/drink_robot_detections')
         self.detection_output_dir.mkdir(parents=True, exist_ok=True)
         self.get_logger().info(f'Detection results will be saved to: {self.detection_output_dir}')
+        
+        self.cup_vis_pub = self.create_publisher(Image, '/drinks_robot/cup_detection_vis', 10)
+        self.container_vis_pub = self.create_publisher(Image, '/drinks_robot/container_detection_vis', 10)
 
         self._action_server = ActionServer(
             self,
@@ -141,6 +157,65 @@ class DrinkRobotNode(DUAL_AMM_Node):
         self.get_logger().info(
             f'drink_robot_node ready, supported drinks: {self.config.supported_drinks}'
         )
+
+        self._talk_pub = self.create_publisher(String, 'voice_chatter', 10)
+
+    def speak(self, text: str):
+        msg = String()
+        msg.data = text
+        self._talk_pub.publish(msg)
+        self.get_logger().info(f'[speak] {text}')
+
+    @property
+    def state(self) -> DrinkTaskState:
+        return self._state
+
+    @state.setter
+    def state(self, new_state: DrinkTaskState):
+        self._state = new_state
+        if hasattr(self, 'status_pub'):
+            status_data = { 
+                "state": new_state.value,
+                "current_drink": self.current_order.get('drink_type', 'None') if self.current_order else 'None',
+                "counters": self.drink_counters
+            }   
+            msg = String()
+            msg.data = json.dumps(status_data)
+            self.status_pub.publish(msg)
+
+    def _publish_cv_image(self, publisher, cv_img: np.ndarray, encoding: str = "rgb8"):
+        if cv_img is None:
+            return
+        self.get_logger().info(f'Publishing visualization image with encoding: {encoding}, topic: {publisher.topic_name}')
+        img_msg = Image()
+        img_msg.header = Header()
+        img_msg.header.stamp = self.get_clock().now().to_msg()
+        img_msg.header.frame_id = "camera_frame"
+
+        h, w = cv_img.shape[:2]
+        img_msg.height = h
+        img_msg.width = w
+        img_msg.encoding = encoding
+        img_msg.is_bigendian = 0
+
+        channels = cv_img.shape[2] if len(cv_img.shape) == 3 else 1
+        img_msg.step = w * channels
+        img_msg.data = cv_img.tobytes()
+
+        publisher.publish(img_msg)
+
+    def _srv_reset_specific_cb(self, request, response, drink_type: str):
+        """清空特定飲料的已倒杯數計數器"""
+        if drink_type in self.drink_counters:
+            self.drink_counters[drink_type] = 0
+            self.get_logger().info(f'已補滿【{drink_type}】水壺，計數器手動歸零。')
+            response.success = True
+            response.message = f"{drink_type} 計數器已成功歸零。"
+            self.state = self.state
+        else:
+            response.success = False
+            response.message = f"未知的飲料類型: {drink_type}"
+        return response
 
     def _load_config(self) -> DrinkRobotConfig:
         pkg_path = get_package_share_directory('drinks_robot')
@@ -161,16 +236,11 @@ class DrinkRobotNode(DUAL_AMM_Node):
         )
 
     def _goal_callback(self, goal_request: ExecuteDrinkTask.Goal) -> GoalResponse:
-        """Accept or reject incoming goals based on current state."""
         if self.state != DrinkTaskState.IDLE:
-            self.get_logger().warning(
-                f'Rejecting goal: robot is not IDLE (current state: {self.state})'
-            )
+            self.get_logger().warning(f'Rejecting goal: robot is not IDLE (current state: {self.state})')
             return GoalResponse.REJECT
         if goal_request.drink_type not in self.config.supported_drinks:
-            self.get_logger().warning(
-                f'Rejecting goal: unsupported drink "{goal_request.drink_type}"'
-            )
+            self.get_logger().warning(f'Rejecting goal: unsupported drink "{goal_request.drink_type}"')
             return GoalResponse.REJECT
         return GoalResponse.ACCEPT
 
@@ -190,13 +260,7 @@ class DrinkRobotNode(DUAL_AMM_Node):
             target=lambda: asyncio.run(self._execute_action(goal_handle)), daemon=True
         ).start()
 
-    def _publish_feedback(
-        self,
-        goal_handle: ServerGoalHandle,
-        state: DrinkTaskState,
-        progress: float,
-        description: str,
-    ) -> None:
+    def _publish_feedback(self, goal_handle: ServerGoalHandle, state: DrinkTaskState, progress: float, description: str) -> None:
         """Publish feedback to the action client."""
         fb = ExecuteDrinkTask.Feedback()
         fb.state = state.value
@@ -205,11 +269,7 @@ class DrinkRobotNode(DUAL_AMM_Node):
         goal_handle.publish_feedback(fb)
         self.get_logger().info(f'[feedback] {state.value} ({progress:.0%}) - {description}')
 
-    async def _abort_with_home(
-        self,
-        goal_handle: ServerGoalHandle,
-        result: ExecuteDrinkTask.Result,
-    ) -> ExecuteDrinkTask.Result:
+    async def _abort_with_home(self, goal_handle: ServerGoalHandle, result: ExecuteDrinkTask.Result) -> ExecuteDrinkTask.Result:
         """Helper to abort goal after attempting home reset."""
         self.get_logger().info('Goal cancelled — returning arms to home.')
         await self._handle_cancel_or_failure_async()
@@ -218,6 +278,20 @@ class DrinkRobotNode(DUAL_AMM_Node):
         goal_handle.canceled()
         self.state = DrinkTaskState.IDLE
         return result
+
+    async def _handle_cancel_or_failure_async(self) -> None:
+        """分級安全復位機制，防止半空中鬆開夾爪導致容器摔落"""
+        self.get_logger().error(f'觸發異常/取消退場機制，當前狀態: {self.state.value}')
+        try:
+            if self.state in [DrinkTaskState.POUR, DrinkTaskState.PICK_CONTAINER]:
+                self.get_logger().info('倒水或持有水壺途中失敗，將右手臂移回初始傾倒點位置...')
+                await self.robot_controller_right.move_to_pose_async(self.POUR_WAYPOINTS[0], velocity=0.3)
+                await self.robot_controller_right.wait_for_arrival_async(self.POUR_WAYPOINTS[0])
+    
+            await self.robot_controller_left.move_to_home_async()
+            await self.robot_controller_right.move_to_home_async()
+        except Exception as ex: 
+            self.get_logger().fatal(f'安全退場機制執行中發生嚴重硬體通訊錯誤: {ex}')
 
     async def _execute_action(self, goal_handle: ServerGoalHandle) -> ExecuteDrinkTask.Result:
         """Execute the drink task as a ROS2 action."""
@@ -232,12 +306,8 @@ class DrinkRobotNode(DUAL_AMM_Node):
             # ==========================================
             # Phase A: Detect + pick cup (left) and container (right) in parallel
             # ==========================================
-            left_task = asyncio.create_task(
-                self._phase_cup_detect_pick_and_stage(goal_handle)
-            )
-            right_task = asyncio.create_task(
-                self._phase_container_detect_pick_and_stage(goal_handle, drink_type)
-            )
+            left_task = asyncio.create_task(self._phase_cup_detect_pick_and_stage(goal_handle))
+            right_task = asyncio.create_task(self._phase_container_detect_pick_and_stage(goal_handle, drink_type))
             try:
                 await asyncio.gather(left_task, right_task)
             except Exception:
@@ -262,47 +332,36 @@ class DrinkRobotNode(DUAL_AMM_Node):
             self.drink_counters[drink_type] += 1
             current_cup_num = self.drink_counters[drink_type]
             self.get_logger().info(f'目前是第 {current_cup_num} 杯 {drink_type}')
+            self.state = self.state
 
             target_wp_index = self.pour_depth_mapping.get(current_cup_num, 10)
             executed_waypoints = self.POUR_WAYPOINTS[0 : target_wp_index + 1]
             
-
             # Right arm is already at POUR_WAYPOINTS[0]; move through the remaining waypoints
             for wp in executed_waypoints:
-                await self.robot_controller_right.move_to_pose_async(
-                    wp, motion_type=MotionType.LINE_T, velocity=0.3
-                )
-
+                await self.robot_controller_right.move_to_pose_async(wp, motion_type=MotionType.LINE_T, velocity=0.3)
 
             await self.robot_controller_right.wait_for_arrival_async(self.POUR_WAYPOINTS[target_wp_index])
-            # await self.robot_controller_right.wait_for_arrival_async(self.POUR_WAYPOINTS[-1])
             await asyncio.sleep(self.pour_wait_mapping.get(current_cup_num, 1.5))  # Hold pour position for a moment
+
             # ==========================================
             # Phase 6: Reset to home
             # ==========================================
 
             # Return container: reverse pour path → lower to holder → release
-            # for wp in self.POUR_RETURN_WAYPOINTS:
-                # await self.robot_controller_right.move_to_pose_async(wp, motion_type=MotionType.LINE_T, velocity=0.3)
-
             self._publish_feedback(goal_handle, self.state, 0.84, '任務完成，手臂復位...')
             return_waypoints = list(reversed(executed_waypoints[:-1])) + [self.POUR_WAYPOINTS[0]]
 
             for wp in return_waypoints:
-                await self.robot_controller_right.move_to_pose_async(
-                    wp, motion_type=MotionType.LINE_T, velocity=0.3
-                )
+                await self.robot_controller_right.move_to_pose_async(wp, motion_type=MotionType.LINE_T, velocity=0.3)
 
             self._container_place_base[0] = self._container_place_base[0] - 0.01
             self._container_place_approach_base[0] = self._container_place_approach_base[0] - 0.01
             container_lift     = [*self._container_place_base[:2], self._container_place_base[2] + 0.5, *self._container_place_orient[:3]]
-            container_place    = [*self._container_place_base[:2], self._container_place_base[2] +0.005, *self._container_place_orient[:3]]
+            container_place    = [*self._container_place_base[:2], self._container_place_base[2] +0.001, *self._container_place_orient[:3]]
             container_approach = [*self._container_place_approach_base[:2], self._container_place_approach_base[2], *self._container_place_orient[:3]]
             await self.robot_controller_right.move_to_pose_async(container_lift, velocity=0.8)
             await self.robot_controller_right.wait_for_arrival_async(container_lift)
-            
-
-            # self._publish_feedback(goal_handle, self.state, 0.84, '任務完成，手臂復位...')
 
             # Right arm reached container_lift (above holder) → left cup return and
             # right container place+home can now run in parallel without collision.
@@ -330,6 +389,9 @@ class DrinkRobotNode(DUAL_AMM_Node):
                 await self.robot_controller_left.move_to_pose_async(cup_return_lift, motion_type=MotionType.LINE_T, velocity=0.8)
                 await self.robot_controller_left.wait_for_arrival_async(cup_return_lift)
                 await self.robot_controller_left.move_to_home_async()
+                # self.speak(f'正在尋找 {drink_type} 的容器，請稍候...')
+                self.speak(f'{drink_type} 已完成，請取走飲料！')
+
 
             left_home_task = asyncio.create_task(_left_place_cup_and_home())
             right_home_task = asyncio.create_task(_right_place_container_and_home())
@@ -343,6 +405,7 @@ class DrinkRobotNode(DUAL_AMM_Node):
                 raise
 
             self.state = DrinkTaskState.FINISH
+            
             self._publish_feedback(goal_handle, self.state, 1.0, '飲料任務成功完成！')
             result.success = True
             result.message = f'Order completed: {drink_type}'
@@ -355,7 +418,6 @@ class DrinkRobotNode(DUAL_AMM_Node):
             self.get_logger().error(f'任務失敗: {e}')
             import traceback
             self.get_logger().error(traceback.format_exc())
-            self.get_logger().info('嘗試安全復位...')
             await self._handle_cancel_or_failure_async()
             result.success = False
             result.message = f'Order failed: {e}'
@@ -368,8 +430,13 @@ class DrinkRobotNode(DUAL_AMM_Node):
     ) -> Tuple[Optional[ContainerDetection], Optional[np.ndarray], Optional[np.ndarray], Optional[dict]]:
         target_ids = [mid for mid, drink in self.config.container_id_to_drink.items() if drink == drink_type]
         if not target_ids:
-            self.get_logger().error(f'no ArUco mapping for drink type: {drink_type}')
+            self.get_logger().error(f'no Ar-90.00000Uco mapping for drink type: {drink_type}')
             return None, None, None, None
+
+        self.get_logger().info('正在清空右側相機舊緩存隊列...')
+        for _ in range(10):
+            self.realsense_controller_right.get_rgb_image()
+            self.realsense_controller_right.get_depth_image()
 
         image = self.realsense_controller_right.get_rgb_image()
         depth_img = self.realsense_controller_right.get_depth_image()
@@ -427,12 +494,10 @@ class DrinkRobotNode(DUAL_AMM_Node):
 
         position = T_marker2base[:3, 3]
         orientation = Rotation.from_matrix(T_marker2base[:3, :3]).as_euler('xyz')
-        pos_str = f"x={position[0]:.3f}, y={position[1]:.3f}, z={position[2]:.3f}"
-        rot_str = f"rx={orientation[0]:.3f}, ry={orientation[1]:.3f}, rz={orientation[2]:.3f}"
-        self.get_logger().info(
-            f'Container {detection.marker_id} detected (base frame):\n'
-            f'  Pos: {pos_str}\n  Rot: {rot_str}'
-        )
+        self.get_logger().info(f'Container {detection.marker_id} detected (base frame): Pos={position.tolist()}')
+
+        img_out = self.container_detector.draw_detections(image, [detection])
+        self._publish_cv_image(self.container_vis_pub, img_out, encoding="bgr8")
 
         return detection, T_marker2base, depth_img, intrinsics
 
@@ -445,6 +510,11 @@ class DrinkRobotNode(DUAL_AMM_Node):
                 self.get_logger().error('cup model not found under resource/yolov11sObb_cup.pt')
                 return None, None, None
             self.cup_detector = CupDetector(model_path=model_path)
+
+        self.get_logger().info('正在清空左側相機舊緩存隊列...')
+        for _ in range(10):
+            self.realsense_controller_left.get_rgb_image()
+            self.realsense_controller_left.get_depth_image()
 
         image = self.realsense_controller_left.get_rgb_image()
         depth_image = self.realsense_controller_left.get_depth_image()
@@ -465,9 +535,7 @@ class DrinkRobotNode(DUAL_AMM_Node):
         
         return detections[0], depth_image, intrinsics
 
-    def _draw_and_save_container_detection(
-        self, image: np.ndarray, detection: ContainerDetection
-    ) -> None:
+    def _draw_and_save_container_detection(self, image: np.ndarray, detection: ContainerDetection) -> None:
         """Delegate drawing to detector, then save the annotated image."""
         img_out = self.container_detector.draw_detections(image, [detection])
         fname = f"container_{detection.marker_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
@@ -513,9 +581,7 @@ class DrinkRobotNode(DUAL_AMM_Node):
         return int(round(center[0])), int(round(center[1]))
 
     @staticmethod
-    def _calculate_obb_direction(
-        obb: Optional[np.ndarray]
-    ) -> Optional[Dict[str, float]]:
+    def _calculate_obb_direction(obb: Optional[np.ndarray]) -> Optional[Dict[str, float]]:
         """
         Calculate the OBB direction.
         Standardizes it to point towards the top of the image (negative y).
@@ -526,14 +592,13 @@ class DrinkRobotNode(DUAL_AMM_Node):
         points = np.array(obb, dtype=float).reshape(-1, 2)
         if len(points) < 4:
             return None
-            
+
         # Extract the two edge vectors from the rectangle
         v1 = points[1] - points[0]
         v2 = points[2] - points[1]
-        
         len1 = np.linalg.norm(v1)
         len2 = np.linalg.norm(v2)
-        
+
         # Direction is parallel to the longer edge
         if len1 > len2:
             direction = v1 / len1
@@ -581,7 +646,8 @@ class DrinkRobotNode(DUAL_AMM_Node):
         """Left arm: detect cup → grasp → stage at pour hold pose. Raises on failure."""
         if goal_handle.is_cancel_requested:
             return
-
+        await asyncio.sleep(40)  # Brief pause to ensure feedback is sent before starting motions
+        self.speak("顧客您好，您的咖啡已送達，請放置杯子。")
         self.state = DrinkTaskState.DETECT_CUP
         self._publish_feedback(goal_handle, self.state, 0.0, '移動左臂至杯子觀測點...')
 
@@ -600,8 +666,7 @@ class DrinkRobotNode(DUAL_AMM_Node):
 
         cup_base = self._cup_detection_to_base_point(cup_detection, cv_depth, intrinsics)
 
-        # YENLEE: Here debug need
-        # --- Move camera to align with cup OBB center ---
+        # Move camera to align with cup OBB center
         self._publish_feedback(goal_handle, self.state, 0.08, '移動相機對齊杯子中心...')
         T_cam2base = self._camera_to_base_transform('left')
         cam_pos_base = T_cam2base[:3, 3]
@@ -616,26 +681,97 @@ class DrinkRobotNode(DUAL_AMM_Node):
         await self.robot_controller_left.wait_for_arrival_async(aligned_view_pose, timeout=15.0)
         await asyncio.sleep(1.5)
 
-        self._publish_feedback(goal_handle, self.state, 0.12, '執行杯子影像偵測 (精確定位)...')
-        cup_detection, cv_depth, intrinsics = self._detect_left_cup()
-        if cup_detection is None:
-            raise RuntimeError('無法在畫面中二次偵測到杯子')
+        self._publish_feedback(goal_handle, self.state, 0.12, '執行時間序列投票與杯子面積比例過濾中...')
+        valid_cup_bases = []
+        last_cup_detection = None
+        last_intrinsics = None
 
-        cup_base = self._cup_detection_to_base_point(cup_detection, cv_depth, intrinsics)
+        MIN_CUP_AREA_RATIO = 0.01
+        MAX_CUP_AREA_RATIO = 0.07
 
-        obb_dir = self._calculate_obb_direction(cup_detection.obb)
-        if obb_dir is not None:
-            matrix = self._as_matrix_3x3(intrinsics.get('matrix', []))
+        for idx in range(3):
+            self.get_logger().info(f'進行第 {idx + 1} / 3 次精確辨識擷取...')
+            
+            self.get_logger().info('正在清空左側相機舊緩存隊列...')
+            for _ in range(10):
+                self.realsense_controller_left.get_rgb_image()
+                self.realsense_controller_left.get_depth_image()
+
+            image = self.realsense_controller_left.get_rgb_image()
+            depth_image = self.realsense_controller_left.get_depth_image()
+            intrinsics = self.realsense_controller_left.get_camera_intrinsics()
+
+            if image is None or depth_image is None or intrinsics is None:
+                self.get_logger().error('左側相機資料未就緒，跳過此幀採樣')
+                continue
+
+            all_detections = self.cup_detector.detect(image)
+            
+            if not all_detections:
+                self.get_logger().warn(f'第 {idx + 1} 次採樣未偵測到任何杯子')
+                continue
+
+            self.get_logger().info(f'本幀原始 YOLO 共偵測到 {len(all_detections)} 個候選框，開始逐一過濾幾何面積...')
+
+            frame_valid_detections = []
+            img_h, img_w = depth_image.shape[:2]
+            total_image_pixels = float(img_h * img_w)
+
+            for det in all_detections:
+                try:
+                    pts = np.array(det.obb, dtype=float).reshape(-1, 2)
+                    edge1 = np.linalg.norm(pts[1] - pts[0])
+                    edge2 = np.linalg.norm(pts[2] - pts[1])
+                    cup_pixel_area = float(edge1 * edge2)
+                    cup_area_ratio = cup_pixel_area / total_image_pixels
+                    
+                    if MIN_CUP_AREA_RATIO <= cup_area_ratio <= MAX_CUP_AREA_RATIO:
+                        frame_valid_detections.append(det)
+                        self.get_logger().info(
+                            f'  -> 保留Cup {det.cup_id}: 比例 {cup_area_ratio * 100:.2f}% 符合 4% 基準。'
+                        )
+                    else:
+                        self.get_logger().warning(
+                            f'  -> 剔除Cup {det.cup_id}: 比例 {cup_area_ratio * 100:.2f}% 異常，手動忽略。'
+                        )
+                except Exception as area_err:
+                    self.get_logger().warn(f'個別物件幾何面積檢查異常: {area_err}')
+
+            if frame_valid_detections:
+                best_det = frame_valid_detections[0]
+                try:
+                    c_base = self._cup_detection_to_base_point(best_det, depth_image, intrinsics)
+                    valid_cup_bases.append(c_base)
+                    last_cup_detection = best_det 
+                    last_intrinsics = intrinsics
+                except Exception as ex: 
+                    self.get_logger().warn(f'合格杯子基點計算深度異常: {ex}')
+            else:
+                self.get_logger().warning(f'第 {idx + 1} 次採樣的照片中，所有偵測框都因比例不符而被剔除。')
+
+            await asyncio.sleep(0.3)
+
+        if len(valid_cup_bases) == 0 or last_cup_detection is None:
+            raise RuntimeError('幾何面積比例篩選與時間投票失敗，未偵測到任何大小正常的紙杯')
+
+        cup_base_array = np.array(valid_cup_bases)
+        cup_base = np.median(cup_base_array, axis=0).tolist()
+        self.get_logger().info(f'幾何過濾與投票完成，最終平均校正基點: {cup_base}')
+        
+        self._save_detection_results(image, [last_cup_detection], depth_image, last_intrinsics)
+
+        obb_dir = self._calculate_obb_direction(last_cup_detection.obb)
+        if obb_dir is not None and last_intrinsics is not None:
+            matrix = self._as_matrix_3x3(last_intrinsics.get('matrix', []))
             fx = matrix[0, 0]
             fy = matrix[1, 1]
-            center_u, center_v = self._cup_center_pixel(cup_detection)
-            depth = self._sample_depth(cv_depth, center_u, center_v)
+            center_u, center_v = self._cup_center_pixel(last_cup_detection)
+
+            _fresh_image = self.realsense_controller_left.get_rgb_image()
+            fresh_depth = self.realsense_controller_left.get_depth_image()
+            depth = self._sample_depth(fresh_depth, center_u, center_v)
             if depth is not None:
-                cam_vec = np.array([
-                    obb_dir['dx'] * depth / fx,
-                    obb_dir['dy'] * depth / fy,
-                    0.0, 0.0
-                ])
+                cam_vec = np.array([obb_dir['dx'] * depth / fx, obb_dir['dy'] * depth / fy, 0.0, 0.0])
                 T_cam2base = self._camera_to_base_transform('left')
                 base_vec = (T_cam2base @ cam_vec)[:3]
                 norm_val = np.linalg.norm(base_vec)
@@ -674,107 +810,146 @@ class DrinkRobotNode(DUAL_AMM_Node):
         await self.robot_controller_left.move_to_pose_async(self.LEFT_ARM_POUR_HOLD_POSE)
         await self.robot_controller_left.wait_for_arrival_async(self.LEFT_ARM_POUR_HOLD_POSE)
 
-
-    async def _phase_container_detect_pick_and_stage(
-        self, goal_handle: ServerGoalHandle, drink_type: str
-    ) -> None:
+    async def _phase_container_detect_pick_and_stage(self, goal_handle: ServerGoalHandle, drink_type: str) -> None:
         """Right arm: detect container → grasp handle → stage at first pour waypoint."""
         if goal_handle.is_cancel_requested:
             return
 
-        self.state = DrinkTaskState.DETECT_CONTAINER
-        self._publish_feedback(goal_handle, self.state, 0.34, '移動右臂至容器觀測點...')
+        MAX_RETRIES = 3
+        retry_count = 0
+        grasp_success = False
+        GRIPPER_POS_THRESHOLD = 210
 
-        right_view_pose = self.RIGHT_CONTAINER_VIEW_POSE
-        await self.robot_controller_right.move_to_pose_async(right_view_pose)
-        await self.robot_controller_right.wait_for_arrival_async(right_view_pose, timeout=30.0)
-        await asyncio.sleep(3.0)
+        # self.speak(f'正在尋找 {drink_type} 的容器，請稍候...')
+        
+        while retry_count < MAX_RETRIES and not grasp_success:
+            retry_count += 1
 
-        if goal_handle.is_cancel_requested:
-            return
+            self.state = DrinkTaskState.DETECT_CONTAINER
+            self._publish_feedback(goal_handle, self.state, 0.34, f'移動右臂至觀測點 (第 {retry_count} 次)...')
+            right_view_pose = self.RIGHT_CONTAINER_VIEW_POSE
+            await self.robot_controller_right.move_to_pose_async(right_view_pose)
+            await self.robot_controller_right.wait_for_arrival_async(right_view_pose, timeout=30.0)
+            await asyncio.sleep(2.5)
 
-        self._publish_feedback(goal_handle, self.state, 0.36, '執行容器影像偵測 (初步定位)...')
-        container_detection, T_marker2base, _cv_depth_right, _intrinsics_right = (
-            self._detect_right_container_for_drink(drink_type)
-        )
-        if container_detection is None or T_marker2base is None:
-            raise RuntimeError(f'無法找到對應的飲料容器: {drink_type}')
+            if goal_handle.is_cancel_requested:
+                return
 
-        T_handle2marker = np.eye(4)
-        T_handle2marker[:3, 3] = self.HANDLE_OFFSETS[drink_type]
-        R_handle2marker = np.array([
-            [np.cos(pi/2), 0, np.sin(pi/2)],
-            [0, 1, 0],
-            [-np.sin(pi/2), 0, np.cos(pi/2)]
-        ], dtype=float) @ np.array([
-            [np.cos(pi), -np.sin(pi), 0],
-            [np.sin(pi), np.cos(pi), 0],
-            [0, 0, 1]
-        ], dtype=float)
-        T_handle2marker[:3, :3] = R_handle2marker
+            self._publish_feedback(goal_handle, self.state, 0.36, '執行容器 ArUco 影像偵測...')
+            container_detection, T_marker2base, _cv_depth_right, _intrinsics_right = (
+                self._detect_right_container_for_drink(drink_type)
+            )
+            
+            if container_detection is None or T_marker2base is None:
+                self.get_logger().warning(f'第 {retry_count} 次影像偵測失敗，未辨識到 ArUco 標籤。')
+                if retry_count < MAX_RETRIES:
+                    continue
+                else:
+                    raise RuntimeError(f'已達到最大嘗試次數，無法找到對應的飲料容器: {drink_type}')
 
-        T_handle2marker_approach = T_handle2marker.copy()
-        T_handle2marker_approach[0, 3] -= 0.05
+            T_handle2marker = np.eye(4)
+            T_handle2marker[:3, 3] = self.HANDLE_OFFSETS[drink_type]
+            R_handle2marker = np.array([
+                [np.cos(pi/2), 0, np.sin(pi/2)],
+                [0, 1, 0],
+                [-np.sin(pi/2), 0, np.cos(pi/2)]
+            ], dtype=float) @ np.array([
+                [np.cos(pi), -np.sin(pi), 0],
+                [np.sin(pi), np.cos(pi), 0],
+                [0, 0, 1]
+            ], dtype=float)
+            T_handle2marker[:3, :3] = R_handle2marker
 
-        T_handle2base = T_marker2base @ T_handle2marker
-        T_handle2base_approach = T_marker2base @ T_handle2marker_approach
-        R_handle2base = T_handle2base[:3, :3]
-        handle_base = T_handle2base[:3, 3].tolist()
-        handle_approach_base = T_handle2base_approach[:3, 3].tolist()
-        self.get_logger().info(f'Handle base after matrix offset: {handle_base}')
-        self.get_logger().info(f'Handle approach base after matrix offset: {handle_approach_base}')
+            T_handle2marker_approach = T_handle2marker.copy()
+            T_handle2marker_approach[0, 3] -= 0.05
 
-        handle_grasp_orient = Rotation.from_matrix(R_handle2base).as_euler('xyz').tolist()
-        self._container_place_base = handle_base
-        self._container_place_approach_base = handle_approach_base
-        self._container_place_orient = handle_grasp_orient
-        self.get_logger().info(f'Handle grasp orientation (ArUco Y-axis +90°): {handle_grasp_orient}')
+            T_handle2base = T_marker2base @ T_handle2marker
+            T_handle2base_approach = T_marker2base @ T_handle2marker_approach
+            R_handle2base = T_handle2base[:3, :3]
+            handle_base = T_handle2base[:3, 3].tolist()
+            handle_approach_base = T_handle2base_approach[:3, 3].tolist()
+            handle_grasp_orient = Rotation.from_matrix(R_handle2base).as_euler('xyz').tolist()
 
-        self.state = DrinkTaskState.PICK_CONTAINER
-        self._publish_feedback(goal_handle, self.state, 0.50, '執行夾取容器...')
+            self._container_place_base = handle_base
+            self._container_place_approach_base = handle_approach_base
+            self._container_place_orient = handle_grasp_orient
 
-        if goal_handle.is_cancel_requested:
-            return
+            self.state = DrinkTaskState.PICK_CONTAINER
+            self._publish_feedback(goal_handle, self.state, 0.50, '執行夾取容器...')
 
-        await self.robot_controller_right.move_to_pose_async(
-            self.CONTAINER_READY_POSE_J, motion_type=MotionType.PTP_J
-        )
+            if goal_handle.is_cancel_requested:
+                return
 
-        await self.gripper_controller_right.open_gripper_async()
-        handle_approach = [*handle_approach_base[:2], handle_approach_base[2], *handle_grasp_orient[:3]]
-        self.get_logger().info(f'moving right arm to handle approach pose: {handle_approach}')
-        await self.robot_controller_right.move_to_pose_async(handle_approach, velocity=1.0)
-        await self.robot_controller_right.wait_for_arrival_async(handle_approach)
+            await self.robot_controller_right.move_to_pose_async(
+                self.CONTAINER_READY_POSE_J, motion_type=MotionType.PTP_J
+            )
+            await self.gripper_controller_right.open_gripper_async()
+            
+            handle_approach = [*handle_approach_base[:2], handle_approach_base[2], *handle_grasp_orient[:3]]
+            await self.robot_controller_right.move_to_pose_async(handle_approach, velocity=1.0)
+            await self.robot_controller_right.wait_for_arrival_async(handle_approach)
 
-        if goal_handle.is_cancel_requested:
-            return
+            if goal_handle.is_cancel_requested:
+                return
 
-        handle_grasp = [*handle_base[:2], handle_base[2], *handle_grasp_orient[:3]]
-        self.get_logger().info(f'moving right arm to handle grasp pose: {handle_grasp}')
-        await self.robot_controller_right.move_to_pose_async(
-            handle_grasp, motion_type=MotionType.LINE_T, velocity=0.5
-        )
-        await self.robot_controller_right.wait_for_arrival_async(handle_grasp)
-        await self.gripper_controller_right.set_gripper_state_async(
-            position=int(1.0 * 255 + 0.5),
-            wait_time=2,
-        )
-        handle_grasp[2] += 0.5  # Lift up slightly after grasping
-        self.get_logger().info(f"Moving to lifted pose: {handle_grasp}")
-        await self.robot_controller_right.move_to_pose_async(handle_grasp, motion_type=MotionType.LINE_T, velocity=0.5)
+            handle_grasp = [*handle_base[:2], handle_base[2], *handle_grasp_orient[:3]]
+            await self.robot_controller_right.move_to_pose_async(
+                handle_grasp, motion_type=MotionType.LINE_T, velocity=0.5
+            )
+            await self.robot_controller_right.wait_for_arrival_async(handle_grasp)
+            
+            await self.gripper_controller_right.set_gripper_state_async(
+                position=int(1.0 * 255 + 0.5),
+                wait_time=2,
+            )
 
+            try:
+                gripper_status = await self.gripper_controller_right.get_gripper_status_async();
+                self.get_logger().info(f'夾爪狀態回饋: {gripper_status}')
+                # Extract the position safely out of the text string
+                current_pos = None
+                if hasattr(gripper_status, 'result') and "Pos:" in gripper_status.result:
+                    try:
+                        # Splits 'STOPPED_NO_OBJECT | Pos: 230 | Frc: 0' by '|', looks for 'Pos:'
+                        for part in gripper_status.result.split('|'):
+                            if 'Pos:' in part:
+                                current_pos = int(part.split(':')[1].strip())
+                    except Exception as e:
+                        self.get_logger().warn(f"Failed to parse gripper position from string: {e}")
 
-        # Stage at first pour waypoint so Phase B (pour) can start immediately
-        self.get_logger().info(
-            f'staging right arm at first pour waypoint: {self.POUR_WAYPOINTS[0]}'
-        )
+                # Now you can safely use current_pos (e.g., 230)
+                if current_pos is not None:
+                    self.get_logger().info(f"Successfully parsed gripper position: {current_pos}")
+                else:
+                    self.get_logger().warn("Could not read gripper position, defaulting flow.")
+                self.get_logger().info(f'當前夾爪閉合位置為: {current_pos}')
 
+                if current_pos > GRIPPER_POS_THRESHOLD:
+                    self.get_logger().warning(f'偵測到空夾 (Position: {current_pos} > {GRIPPER_POS_THRESHOLD})，準備重試。')
+                    grasp_success = False
+                else:
+                    self.get_logger().info('成功夾取水壺把手!')
+                    grasp_success = True
 
+            except Exception as e:
+                self.get_logger().warn(f'無法讀取夾爪狀態回饋 ({e})，預設繼續執行流程。')
+                grasp_success = True
 
-        await self.robot_controller_right.move_to_pose_async(
-            self.POUR_WAYPOINTS[0], motion_type=MotionType.LINE_T, velocity=1.0
-        )
-        await self.robot_controller_right.wait_for_arrival_async(self.POUR_WAYPOINTS[0])
+            if grasp_success:
+                handle_grasp[2] += 0.5
+                await self.robot_controller_right.move_to_pose_async(handle_grasp, motion_type=MotionType.LINE_T, velocity=0.5)
+                await self.robot_controller_right.move_to_pose_async(self.POUR_WAYPOINTS[0], motion_type=MotionType.LINE_T, velocity=1.0)
+                await self.robot_controller_right.wait_for_arrival_async(self.POUR_WAYPOINTS[0])
+            else:
+                self.get_logger().info('夾取失敗，正在安全退回預備位置...')
+                await self.gripper_controller_right.open_gripper_async()
+                await self.robot_controller_right.move_to_pose_async(handle_approach, motion_type=MotionType.LINE_T, velocity=0.5)
+                await self.robot_controller_right.wait_for_arrival_async(handle_approach)
+
+                if retry_count >= MAX_RETRIES:
+                    raise RuntimeError(f'已重試 {MAX_RETRIES} 次皆夾取失敗，任務被迫中止。')
+
+        self.get_logger().info('右手水壺夾取暨定位完成。')
 
     # NOTE: 目前只有左手使用。右手夾 container 握把需要 LINE_T 軌跡
     # （PTP_T 曲線會撞到容器），所以走 Phase 3 / 4 內的 inline 實作。
@@ -936,6 +1111,7 @@ class DrinkRobotNode(DUAL_AMM_Node):
             f'Detection results saved: {json_filename} ({len(detections)} cups detected)'
         )
 
+        self._publish_cv_image(self.cup_vis_pub, vis_image, encoding="rgb8")
 
 
 def main(args=None):
